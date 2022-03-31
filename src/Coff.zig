@@ -4,6 +4,7 @@
 const Coff = @This();
 
 const std = @import("std");
+const Cld = @import("Cld.zig");
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.coff);
 
@@ -17,9 +18,6 @@ sections: std.ArrayListUnmanaged(Section) = .{},
 relocations: std.AutoHashMapUnmanaged(u16, []const Relocation) = .{},
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 string_table: []const u8,
-
-/// Maps original symbol index to their new index
-sym_map: std.AutoHashMapUnmanaged(u32, u32) = .{},
 
 pub const Header = struct {
     machine: std.coff.MachineType,
@@ -74,106 +72,120 @@ pub const Symbol = struct {
         return @intToEnum(BaseType, @truncate(u8, symbol.sym_type >> 8));
     }
 
+    pub fn isFunction(symbol: Symbol) bool {
+        return symbol.sym_type == 0x20;
+    }
+
+    pub fn isUndefined(symbol: Symbol) bool {
+        return symbol.section_number == 0;
+    }
+
+    pub fn isWeak(symbol: Symbol) bool {
+        return symbol.storage_class == .IMAGE_SYM_CLASS_EXTERNAL and
+            symbol.section_number == 0 and
+            symbol.value == 0;
+    }
+
     const ComplexType = enum(u8) {
-        ///No derived type; the symbol is a simple scalar variable.
+        /// No derived type; the symbol is a simple scalar variable.
         IMAGE_SYM_DTYPE_NULL = 0,
-        ///The symbol is a pointer to base type.
+        /// The symbol is a pointer to base type.
         IMAGE_SYM_DTYPE_POINTER = 1,
-        ///The symbol is a function that returns a base type.
+        /// The symbol is a function that returns a base type.
         IMAGE_SYM_DTYPE_FUNCTION = 2,
-        ///The symbol is an array of base type.
+        /// The symbol is an array of base type.
         IMAGE_SYM_DTYPE_ARRAY = 3,
     };
 
     pub const BaseType = enum(u8) {
-        ///No type information or unknown base type. Microsoft tools use this setting
+        /// No type information or unknown base type. Microsoft tools use this setting
         IMAGE_SYM_TYPE_NULL = 0,
-        ///No valid type; used with void pointers and functions
+        /// No valid type; used with void pointers and functions
         IMAGE_SYM_TYPE_VOID = 1,
-        ///A character (signed byte)
+        /// A character (signed byte)
         IMAGE_SYM_TYPE_CHAR = 2,
-        ///A 2-byte signed integer
+        /// A 2-byte signed integer
         IMAGE_SYM_TYPE_SHORT = 3,
-        ///A natural integer type (normally 4 bytes in Windows)
+        /// A natural integer type (normally 4 bytes in Windows)
         IMAGE_SYM_TYPE_INT = 4,
-        ///A 4-byte signed integer
+        /// A 4-byte signed integer
         IMAGE_SYM_TYPE_LONG = 5,
-        ///A 4-byte floating-point number
+        /// A 4-byte floating-point number
         IMAGE_SYM_TYPE_FLOAT = 6,
-        ///An 8-byte floating-point number
+        /// An 8-byte floating-point number
         IMAGE_SYM_TYPE_DOUBLE = 7,
-        ///A structure
+        /// A structure
         IMAGE_SYM_TYPE_STRUCT = 8,
-        ///A union
+        /// A union
         IMAGE_SYM_TYPE_UNION = 9,
-        ///An enumerated type
+        /// An enumerated type
         IMAGE_SYM_TYPE_ENUM = 10,
-        ///A member of enumeration (a specific value)
+        /// A member of enumeration (a specific value)
         IMAGE_SYM_TYPE_MOE = 11,
-        ///A byte; unsigned 1-byte integer
+        /// A byte; unsigned 1-byte integer
         IMAGE_SYM_TYPE_BYTE = 12,
-        ///A word; unsigned 2-byte integer
+        /// A word; unsigned 2-byte integer
         IMAGE_SYM_TYPE_WORD = 13,
-        ///An unsigned integer of natural size (normally, 4 bytes)
+        /// An unsigned integer of natural size (normally, 4 bytes)
         IMAGE_SYM_TYPE_UINT = 14,
-        ///An unsigned 4-byte integer
+        /// An unsigned 4-byte integer
         IMAGE_SYM_TYPE_DWORD = 15,
     };
 
     pub const Class = enum(u8) {
-        ///No assigned storage class.
+        /// No assigned storage class.
         IMAGE_SYM_CLASS_NULL = 0,
-        ///The automatic (stack) variable. The Value field specifies the stack frame offset.
+        /// The automatic (stack) variable. The Value field specifies the stack frame offset.
         IMAGE_SYM_CLASS_AUTOMATIC = 1,
-        ///A value that Microsoft tools use for external symbols. The Value field indicates the size if the section number is IMAGE_SYM_UNDEFINED (0). If the section number is not zero, then the Value field specifies the offset within the section.
+        /// A value that Microsoft tools use for external symbols. The Value field indicates the size if the section number is IMAGE_SYM_UNDEFINED (0). If the section number is not zero, then the Value field specifies the offset within the section.
         IMAGE_SYM_CLASS_EXTERNAL = 2,
-        ///The offset of the symbol within the section. If the Value field is zero, then the symbol represents a section name.
+        /// The offset of the symbol within the section. If the Value field is zero, then the symbol represents a section name.
         IMAGE_SYM_CLASS_STATIC = 3,
-        ///A register variable. The Value field specifies the register number.
+        /// A register variable. The Value field specifies the register number.
         IMAGE_SYM_CLASS_REGISTER = 4,
-        ///A symbol that is defined externally.
+        /// A symbol that is defined externally.
         IMAGE_SYM_CLASS_EXTERNAL_DEF = 5,
-        ///A code label that is defined within the module. The Value field specifies the offset of the symbol within the section.
+        /// A code label that is defined within the module. The Value field specifies the offset of the symbol within the section.
         IMAGE_SYM_CLASS_LABEL = 6,
-        ///A reference to a code label that is not defined.
+        /// A reference to a code label that is not defined.
         IMAGE_SYM_CLASS_UNDEFINED_LABEL = 7,
-        ///The structure member. The Value field specifies the n th member.
+        /// The structure member. The Value field specifies the n th member.
         IMAGE_SYM_CLASS_MEMBER_OF_STRUCT = 8,
-        ///A formal argument (parameter) of a function. The Value field specifies the n th argument.
+        /// A formal argument (parameter) of a function. The Value field specifies the n th argument.
         IMAGE_SYM_CLASS_ARGUMENT = 9,
-        ///The structure tag-name entry.
+        /// The structure tag-name entry.
         IMAGE_SYM_CLASS_STRUCT_TAG = 10,
-        ///A union member. The Value field specifies the n th member.
+        /// A union member. The Value field specifies the n th member.
         IMAGE_SYM_CLASS_MEMBER_OF_UNION = 11,
-        ///The Union tag-name entry.
+        /// The Union tag-name entry.
         IMAGE_SYM_CLASS_UNION_TAG = 12,
-        ///A Typedef entry.
+        /// A Typedef entry.
         IMAGE_SYM_CLASS_TYPE_DEFINITION = 13,
-        ///A static data declaration.
+        /// A static data declaration.
         IMAGE_SYM_CLASS_UNDEFINED_STATIC = 14,
-        ///An enumerated type tagname entry.
+        /// An enumerated type tagname entry.
         IMAGE_SYM_CLASS_ENUM_TAG = 15,
-        ///A member of an enumeration. The Value field specifies the n th member.
+        /// A member of an enumeration. The Value field specifies the n th member.
         IMAGE_SYM_CLASS_MEMBER_OF_ENUM = 16,
-        ///A register parameter.
+        /// A register parameter.
         IMAGE_SYM_CLASS_REGISTER_PARAM = 17,
-        ///A bit-field reference. The Value field specifies the n th bit in the bit field.
+        /// A bit-field reference. The Value field specifies the n th bit in the bit field.
         IMAGE_SYM_CLASS_BIT_FIELD = 18,
-        ///A .bb (beginning of block) or .eb (end of block) record. The Value field is the relocatable address of the code location.
+        /// A .bb (beginning of block) or .eb (end of block) record. The Value field is the relocatable address of the code location.
         IMAGE_SYM_CLASS_BLOCK = 100,
-        ///A value that Microsoft tools use for symbol records that define the extent of a function: begin function (.bf ), end function ( .ef ), and lines in function ( .lf ). For .lf records, the Value field gives the number of source lines in the function. For .ef records, the Value field gives the size of the function code.
+        /// A value that Microsoft tools use for symbol records that define the extent of a function: begin function (.bf ), end function ( .ef ), and lines in function ( .lf ). For .lf records, the Value field gives the number of source lines in the function. For .ef records, the Value field gives the size of the function code.
         IMAGE_SYM_CLASS_FUNCTION = 101,
-        ///An end-of-structure entry.
+        /// An end-of-structure entry.
         IMAGE_SYM_CLASS_END_OF_STRUCT = 102,
-        ///A value that Microsoft tools, as well as traditional COFF format, use for the source-file symbol record. The symbol is followed by auxiliary records that name the file.
+        /// A value that Microsoft tools, as well as traditional COFF format, use for the source-file symbol record. The symbol is followed by auxiliary records that name the file.
         IMAGE_SYM_CLASS_FILE = 103,
-        ///A definition of a section (Microsoft tools use STATIC storage class instead).
+        /// A definition of a section (Microsoft tools use STATIC storage class instead).
         IMAGE_SYM_CLASS_SECTION = 104,
-        ///A weak external. For more information, see Auxiliary Format 3: Weak Externals.
+        /// A weak external. For more information, see Auxiliary Format 3: Weak Externals.
         IMAGE_SYM_CLASS_WEAK_EXTERNAL = 105,
-        ///A CLR token symbol. The name is an ASCII string that consists of the hexadecimal value of the token. For more information, see CLR Token Definition (Object Only).
+        /// A CLR token symbol. The name is an ASCII string that consists of the hexadecimal value of the token. For more information, see CLR Token Definition (Object Only).
         IMAGE_SYM_CLASS_CLR_TOKEN = 107,
-        //A special symbol that represents the end of function, for debugging purposes.
+        // A special symbol that represents the end of function, for debugging purposes.
         IMAGE_SYM_CLASS_END_OF_FUNCTION = 0xFF,
     };
 };
@@ -430,15 +442,11 @@ fn parseSymbolTable(coff: *Coff) !void {
             .storage_class = @intToEnum(Symbol.Class, try reader.readByte()),
             .number_aux_symbols = try reader.readByte(),
         };
-        try coff.sym_map.putNoClobber(coff.allocator, index, @intCast(u32, coff.symbols.items.len));
         coff.symbols.appendAssumeCapacity(sym);
-
-        if (sym.number_aux_symbols > 0) {
-            index += sym.number_aux_symbols;
-            try reader.skipBytes(
-                18 * sym.number_aux_symbols,
-                .{ .buf_size = 90 },
-            );
-        }
     }
+}
+
+pub fn parseIntoAtoms(coff: Coff, cld: *Cld) !void {
+    _ = coff;
+    _ = cld;
 }
