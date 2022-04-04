@@ -5,6 +5,7 @@ const Coff = @This();
 
 const std = @import("std");
 const Cld = @import("Cld.zig");
+const Atom = @import("Atom.zig");
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.coff);
 
@@ -18,6 +19,7 @@ sections: std.ArrayListUnmanaged(Section) = .{},
 relocations: std.AutoHashMapUnmanaged(u16, []const Relocation) = .{},
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 string_table: []const u8,
+managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 
 pub const Header = struct {
     machine: std.coff.MachineType,
@@ -509,7 +511,60 @@ fn parseSymbolTable(coff: *Coff) !void {
     }
 }
 
-pub fn parseIntoAtoms(coff: Coff, cld: *Cld) !void {
-    _ = coff;
+pub fn parseIntoAtoms(coff: Coff, cld: *Cld, object_index: u16) !void {
     _ = cld;
+    log.debug("parsing into atoms for object file '{s}'", .{coff.name});
+    const gpa = cld.gpa;
+    var symbols_by_section = std.AutoHashMap(u16, std.ArrayList(u32)).init(gpa);
+    defer symbols_by_section.deinit();
+    for (coff.section_table.items) |_, sec_index| {
+        try symbols_by_section.putNoClobber(@intCast(u16, sec_index), std.ArrayList(u32).init(gpa));
+    }
+
+    {
+        var sym_index: u32 = 0;
+        while (sym_index < coff.header.number_of_symbols) : (sym_index += 1) {
+            const symbol: Symbol = coff.symbols.items[sym_index];
+            if (symbol.isUndefined()) continue;
+            if (symbol.section_number <= 0) continue;
+            const map = symbols_by_section.getPtr(@intCast(u16, symbol.section_number - 1)) orelse continue;
+            try map.append(sym_index);
+            sym_index += symbol.number_aux_symbols;
+        }
+    }
+
+    for (coff.section_table.items) |sec_header, sec_index| {
+        const sec_name = sec_header.getName(&coff);
+
+        log.debug("  parsing section '{s}'", .{sec_name});
+
+        const syms = symbols_by_section.get(@intCast(u16, sec_index)).?;
+        if (syms.items.len == 0) {
+            log.debug("  skipping section because no symbols", .{});
+            continue;
+        }
+
+        const atom = try Atom.create(gpa);
+        errdefer atom.destroy(gpa);
+        try cld.managed_atoms.append(gpa, atom);
+        atom.file = object_index;
+        atom.size = sec_header.size_of_raw_data;
+        atom.alignment = sec_header.alignment();
+
+        for (syms.items) |sym_index| {
+            const symbol: Symbol = coff.symbols.items[sym_index];
+            if (symbol.value > 0) {
+                try atom.contained.append(gpa, .{
+                    .sym_index = sym_index,
+                    .offset = symbol.value,
+                });
+            } else try atom.aliases.append(gpa, sym_index);
+        }
+        atom.sym_index = atom.aliases.swapRemove(0);
+        try atom.code.appendSlice(gpa, coff.sections.items[sec_index].slice());
+
+        if (sec_header.number_of_relocations > 0) {
+            atom.relocations = coff.relocations.get(@intCast(u16, sec_index)).?;
+        }
+    }
 }

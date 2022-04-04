@@ -34,6 +34,16 @@ next: ?*Atom,
 /// This is the first atom in the chain when `prev` is 'null'.
 prev: ?*Atom,
 
+/// Symbols by this Atom
+contained: std.ArrayListUnmanaged(SymbolAtOffset) = .{},
+/// Symbol indexes containing an alias to this Atom's symbol
+aliases: std.ArrayListUnmanaged(u32) = .{},
+
+pub const SymbolAtOffset = struct {
+    sym_index: u32,
+    offset: u32,
+};
+
 /// Allocates memory for an `Atom` and initializes an instance
 /// with default values. Memory is owned by the caller.
 pub fn create(gpa: std.mem.Allocator) !*Atom {
@@ -52,7 +62,7 @@ pub fn create(gpa: std.mem.Allocator) !*Atom {
 }
 
 /// Frees all resources contained by this `Atom`.
-pub fn deinit(atom: *Atom, gpa: std.mem.Allocator) void {
+pub fn destroy(atom: *Atom, gpa: std.mem.Allocator) void {
     atom.code.deinit(gpa);
     gpa.free(atom.relocations);
     gpa.destroy(atom);

@@ -93,8 +93,8 @@ pub fn flush(cld: *Cld) !void {
         try resolveSymbolsInObject(cld, @intCast(u16, idx));
     }
 
-    for (cld.objects.items) |object| {
-        try Coff.parseIntoAtoms(object, cld);
+    for (cld.objects.items) |object, idx| {
+        try Coff.parseIntoAtoms(object, cld, @intCast(u16, idx));
     }
 }
 
