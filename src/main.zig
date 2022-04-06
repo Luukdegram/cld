@@ -4,7 +4,7 @@ const mem = std.mem;
 
 const io = std.io;
 
-var gpa_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+var gpa_allocator = std.heap.GeneralPurposeAllocator(.{ .stack_trace_frames = 8 }){};
 const gpa = gpa_allocator.allocator();
 
 pub fn log(

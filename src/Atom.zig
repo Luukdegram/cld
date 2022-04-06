@@ -64,7 +64,8 @@ pub fn create(gpa: std.mem.Allocator) !*Atom {
 /// Frees all resources contained by this `Atom`.
 pub fn destroy(atom: *Atom, gpa: std.mem.Allocator) void {
     atom.code.deinit(gpa);
-    gpa.free(atom.relocations);
+    atom.contained.deinit(gpa);
+    atom.aliases.deinit(gpa);
     gpa.destroy(atom);
 }
 

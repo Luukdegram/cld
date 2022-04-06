@@ -7,7 +7,7 @@ const std = @import("std");
 const Cld = @import("Cld.zig");
 const Atom = @import("Atom.zig");
 const Allocator = std.mem.Allocator;
-const log = std.log.scoped(.coff);
+const log = std.log.scoped(.cld);
 
 allocator: Allocator,
 file: std.fs.File,
@@ -19,7 +19,6 @@ sections: std.ArrayListUnmanaged(Section) = .{},
 relocations: std.AutoHashMapUnmanaged(u16, []const Relocation) = .{},
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 string_table: []const u8,
-managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 
 pub const Header = struct {
     machine: std.coff.MachineType,
@@ -57,14 +56,6 @@ pub const Symbol = struct {
     sym_type: u16,
     storage_class: Class,
     number_aux_symbols: u8,
-
-    pub fn getName(symbol: Symbol, coff: *const Coff) []const u8 {
-        if (std.mem.eql(u8, symbol.name[0..4], &.{ 0, 0, 0, 0 })) {
-            const offset = std.mem.readIntLittle(u32, symbol.name[4..8]);
-            return coff.getString(offset);
-        }
-        return std.mem.sliceTo(&symbol.name, 0);
-    }
 
     pub fn complexType(symbol: Symbol) ComplexType {
         return @intToEnum(ComplexType, @truncate(u8, symbol.sym_type >> 4));
@@ -204,38 +195,27 @@ pub const SectionHeader = struct {
     number_of_line_numbers: u16,
     characteristics: u32,
 
-    pub fn getName(header: SectionHeader, coff: *const Coff) []const u8 {
-        // when name starts with a slash '/', the name of the section
-        // contains a long name. The following bytes contain the offset into
-        // the string table
-        if (header.name[0] == '/') {
-            const offset_len = std.mem.indexOfScalar(u8, header.name[1..], 0) orelse 7;
-            const offset = std.fmt.parseInt(u32, header.name[1..][0..offset_len], 10) catch return "";
-            return coff.getString(offset);
-        }
-        return std.mem.sliceTo(&header.name, 0);
-    }
-
-    /// Returns the alignment for the section in bytes
-    pub fn alignment(header: SectionHeader) u32 {
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_1BYTES != 0) return 1;
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_2BYTES != 0) return 2;
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_4BYTES != 0) return 4;
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_8BYTES != 0) return 8;
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_16BYTES != 0) return 16;
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_32BYTES != 0) return 32;
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_64BYTES != 0) return 64;
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_128BYTES != 0) return 128;
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_256BYTES != 0) return 256;
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_512BYTES != 0) return 512;
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_1024BYTES != 0) return 1024;
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_2048BYTES != 0) return 2048;
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_4096BYTES != 0) return 4096;
-        if (header.characteristics & flags.IMAGE_SCN_ALIGN_8192BYTES != 0) return 8192;
-        unreachable;
-    }
+    /// Set by checking the `characteristics` flags
+    alignment: u32,
 
     pub const flags = struct {
+        fn alignment(flag: u32) u32 {
+            if (flag & flags.IMAGE_SCN_ALIGN_1BYTES != 0) return 1;
+            if (flag & flags.IMAGE_SCN_ALIGN_2BYTES != 0) return 2;
+            if (flag & flags.IMAGE_SCN_ALIGN_4BYTES != 0) return 4;
+            if (flag & flags.IMAGE_SCN_ALIGN_8BYTES != 0) return 8;
+            if (flag & flags.IMAGE_SCN_ALIGN_16BYTES != 0) return 16;
+            if (flag & flags.IMAGE_SCN_ALIGN_32BYTES != 0) return 32;
+            if (flag & flags.IMAGE_SCN_ALIGN_64BYTES != 0) return 64;
+            if (flag & flags.IMAGE_SCN_ALIGN_128BYTES != 0) return 128;
+            if (flag & flags.IMAGE_SCN_ALIGN_256BYTES != 0) return 256;
+            if (flag & flags.IMAGE_SCN_ALIGN_512BYTES != 0) return 512;
+            if (flag & flags.IMAGE_SCN_ALIGN_1024BYTES != 0) return 1024;
+            if (flag & flags.IMAGE_SCN_ALIGN_2048BYTES != 0) return 2048;
+            if (flag & flags.IMAGE_SCN_ALIGN_4096BYTES != 0) return 4096;
+            if (flag & flags.IMAGE_SCN_ALIGN_8192BYTES != 0) return 8192;
+            unreachable;
+        }
         /// The section should not be padded to the next boundary.
         /// This flag is obsolete and is replaced by IMAGE_SCN_ALIGN_1BYTES.
         /// This is valid only for object files.
@@ -348,6 +328,8 @@ pub fn deinit(coff: *Coff) void {
     }
     coff.sections.deinit(gpa);
     coff.relocations.deinit(gpa);
+    coff.symbols.deinit(gpa);
+    gpa.free(coff.string_table);
     coff.* = undefined;
 }
 
@@ -397,7 +379,15 @@ fn parseStringTable(coff: *Coff) !void {
     try coff.file.seekTo(current_pos);
 }
 
-fn getString(coff: *const Coff, offset: u32) []const u8 {
+pub fn getString(coff: Coff, buf: [8]u8) []const u8 {
+    const offset = if (buf[0] == '/') blk: {
+        const offset_len = std.mem.indexOfScalar(u8, buf[1..], 0) orelse 7;
+        const offset = std.fmt.parseInt(u32, buf[1..][0..offset_len], 10) catch return "";
+        break :blk offset;
+    } else if (std.mem.eql(u8, buf[0..4], &.{ 0, 0, 0, 0 })) blk: {
+        break :blk std.mem.readIntLittle(u32, buf[4..8]);
+    } else return std.mem.sliceTo(&buf, 0);
+
     const str = @ptrCast([*:0]const u8, coff.string_table.ptr + offset);
     return std.mem.sliceTo(str, 0);
 }
@@ -424,7 +414,9 @@ fn parseSectionTable(coff: *Coff) !void {
             .number_of_relocations = try reader.readIntLittle(u16),
             .number_of_line_numbers = try reader.readIntLittle(u16),
             .characteristics = try reader.readIntLittle(u32),
+            .alignment = undefined,
         };
+        sec_header.alignment = SectionHeader.flags.alignment(sec_header.characteristics);
 
         log.debug("Parsed section header: '{s}'", .{std.mem.sliceTo(&name, 0)});
         if (sec_header.virtual_size != 0) {
@@ -512,11 +504,16 @@ fn parseSymbolTable(coff: *Coff) !void {
 }
 
 pub fn parseIntoAtoms(coff: Coff, cld: *Cld, object_index: u16) !void {
-    _ = cld;
     log.debug("parsing into atoms for object file '{s}'", .{coff.name});
     const gpa = cld.gpa;
     var symbols_by_section = std.AutoHashMap(u16, std.ArrayList(u32)).init(gpa);
-    defer symbols_by_section.deinit();
+    defer {
+        var it = symbols_by_section.valueIterator();
+        while (it.next()) |syms| {
+            syms.deinit();
+        }
+        symbols_by_section.deinit();
+    }
     for (coff.section_table.items) |_, sec_index| {
         try symbols_by_section.putNoClobber(@intCast(u16, sec_index), std.ArrayList(u32).init(gpa));
     }
@@ -534,7 +531,7 @@ pub fn parseIntoAtoms(coff: Coff, cld: *Cld, object_index: u16) !void {
     }
 
     for (coff.section_table.items) |sec_header, sec_index| {
-        const sec_name = sec_header.getName(&coff);
+        const sec_name = coff.getString(sec_header.name);
 
         log.debug("  parsing section '{s}'", .{sec_name});
 
@@ -544,12 +541,17 @@ pub fn parseIntoAtoms(coff: Coff, cld: *Cld, object_index: u16) !void {
             continue;
         }
 
+        const target_section_index = (try cld.getMatchingSection(object_index, @intCast(u16, sec_index))) orelse {
+            log.info("ignored section '{s}'", .{sec_name});
+            continue;
+        };
+
         const atom = try Atom.create(gpa);
         errdefer atom.destroy(gpa);
         try cld.managed_atoms.append(gpa, atom);
         atom.file = object_index;
         atom.size = sec_header.size_of_raw_data;
-        atom.alignment = sec_header.alignment();
+        atom.alignment = sec_header.alignment;
 
         for (syms.items) |sym_index| {
             const symbol: Symbol = coff.symbols.items[sym_index];
@@ -566,5 +568,19 @@ pub fn parseIntoAtoms(coff: Coff, cld: *Cld, object_index: u16) !void {
         if (sec_header.number_of_relocations > 0) {
             atom.relocations = coff.relocations.get(@intCast(u16, sec_index)).?;
         }
+
+        const target_section: *SectionHeader = &cld.section_headers.items[target_section_index];
+        target_section.alignment = @maximum(target_section.alignment, atom.alignment);
+        target_section.size_of_raw_data = std.mem.alignForwardGeneric(u32, std.mem.alignForwardGeneric(
+            u32,
+            target_section.size_of_raw_data,
+            atom.alignment,
+        ) + atom.size, target_section.alignment);
+
+        if (cld.atoms.getPtr(target_section_index)) |last| {
+            last.*.next = atom;
+            atom.prev = last.*;
+            last.* = atom;
+        } else try cld.atoms.putNoClobber(gpa, target_section_index, atom);
     }
 }
