@@ -124,6 +124,8 @@ pub fn flush(cld: *Cld) !void {
     for (cld.objects.items) |object, idx| {
         try Coff.parseIntoAtoms(object, cld, @intCast(u16, idx));
     }
+
+    try sortSections(cld);
 }
 
 /// Resolves symbols in given object file index.
@@ -133,6 +135,10 @@ fn resolveSymbolsInObject(cld: *Cld, index: u16) !void {
     while (sym_index < object.header.number_of_symbols) : (sym_index += 1) {
         const symbol: Coff.Symbol = object.symbols.items[sym_index];
         defer sym_index += symbol.number_aux_symbols; // skip auxiliry symbols
+
+        // Add all symbols to resolved list for now
+        // TODO: Actually resolve symbols correctly.
+        try cld.resolved_symbols.putNoClobber(cld.gpa, .{ .file = index, .index = sym_index }, {});
     }
 }
 
@@ -188,3 +194,105 @@ fn makeString(cld: *Cld, string: []const u8, string_type: enum { symbol, header 
     }
     return buf;
 }
+
+/// Returns the corresponding string from a given 8-byte buffer
+pub fn getString(cld: Cld, buf: [8]u8) []const u8 {
+    const offset = if (buf[0] == '/') blk: {
+        const offset_len = std.mem.indexOfScalar(u8, buf[1..], 0) orelse 7;
+        const offset = std.fmt.parseInt(u32, buf[1..][0..offset_len], 10) catch return "";
+        break :blk offset;
+    } else if (std.mem.eql(u8, buf[0..4], &.{ 0, 0, 0, 0 })) blk: {
+        break :blk std.mem.readIntLittle(u32, buf[4..8]);
+    } else return std.mem.sliceTo(&buf, 0);
+
+    const str = @ptrCast([*:0]const u8, cld.string_table.items.ptr + offset);
+    return std.mem.sliceTo(str, 0);
+}
+
+/// Sorts sections into the most optimal order
+fn sortSections(cld: *Cld) !void {
+    log.debug("Sorting sections. Old order:", .{});
+    for (cld.section_headers.items) |hdr, index| {
+        log.debug("  {d: >2} {s: >9}", .{ index, cld.getString(hdr.name) });
+    }
+
+    // Sort sections based on their name. When the section is grouped,
+    // we ordinally order the corresponding sections based on alphabetic order.
+    var ctx: SectionSortContext = .{ .cld = cld };
+    std.sort.sort(Coff.SectionHeader, cld.section_headers.items, ctx, SectionSortContext.lessThan);
+
+    // replace old section mapping indexes with the name indexes
+    var old_mapping = std.AutoArrayHashMap(u16, u16).init(cld.gpa);
+    defer old_mapping.deinit();
+    try old_mapping.ensureUnusedCapacity(cld.section_headers.items.len);
+    for (cld.section_headers.items) |hdr, index| {
+        const value = cld.section_mapping.getPtr(cld.getString(hdr.name)).?;
+        const new_index = @intCast(u16, index);
+        old_mapping.putAssumeCapacityNoClobber(value.*, new_index);
+        value.* = new_index;
+    }
+
+    var new_atoms: std.AutoHashMapUnmanaged(u16, *Atom) = .{};
+    try new_atoms.ensureUnusedCapacity(cld.gpa, cld.atoms.count());
+
+    var it = cld.atoms.iterator();
+    while (it.next()) |entry| {
+        const old_index = entry.key_ptr.*;
+        const new_index = old_mapping.get(old_index).?;
+        new_atoms.putAssumeCapacityNoClobber(new_index, entry.value_ptr.*);
+    }
+
+    cld.atoms.deinit(cld.gpa);
+    cld.atoms = new_atoms;
+
+    log.debug("Sorted sections. New order:", .{});
+    for (cld.section_headers.items) |hdr, index| {
+        log.debug("  {d: >2} {s: >9}", .{ index, cld.getString(hdr.name) });
+    }
+}
+
+const SectionSortContext = struct {
+    cld: *const Cld,
+
+    fn value(ctx: SectionSortContext, header: Coff.SectionHeader) u16 {
+        const startsWith = std.mem.startsWith;
+        const name = ctx.cld.getString(header.name);
+        if (startsWith(u8, name, ".text")) {
+            return 0;
+        } else if (startsWith(u8, name, ".data")) {
+            return 1;
+        } else if (startsWith(u8, name, ".bss")) {
+            return 2;
+        } else if (startsWith(u8, name, ".xdata")) {
+            return 3;
+        } else if (startsWith(u8, name, ".rdata")) {
+            return 4;
+        } else if (startsWith(u8, name, ".tls")) {
+            return 5;
+        } else if (startsWith(u8, name, ".debug")) {
+            return 6;
+        } else if (startsWith(u8, name, ".pdata")) {
+            return 7;
+        } else std.debug.panic("TODO: value of section named: '{s}'\n", .{name});
+        unreachable;
+    }
+
+    fn isGroupedFirst(ctx: SectionSortContext, lhs: Coff.SectionHeader, rhs: Coff.SectionHeader) bool {
+        std.debug.assert(lhs.isGrouped() and rhs.isGrouped());
+        const lhs_name = ctx.cld.getString(lhs.name);
+        const rhs_name = ctx.cld.getString(rhs.name);
+        const start = std.mem.indexOfScalar(u8, lhs_name, '$').?;
+        if (start == lhs_name.len - 1) return true;
+        if (start == rhs_name.len - 1) return true;
+        return lhs_name[start + 1] < rhs_name[start + 1];
+    }
+
+    fn lessThan(ctx: SectionSortContext, lhs: Coff.SectionHeader, rhs: Coff.SectionHeader) bool {
+        const lhs_val = ctx.value(lhs);
+        const rhs_val = ctx.value(rhs);
+        if (lhs_val == rhs_val) {
+            return ctx.isGroupedFirst(lhs, rhs);
+        }
+        return lhs_val < rhs_val;
+    }
+};
