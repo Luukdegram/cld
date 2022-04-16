@@ -17,6 +17,13 @@ name: []const u8,
 options: Options,
 /// File descriptor of the output binary
 file: std.fs.File,
+/// Represents the coff file header, instructs the image file
+/// the data layour of the coff sections
+coff_header: Coff.Header,
+/// The optional header provides information to the loader.
+/// While named optional it's not optional for the final binary
+/// when building an image file (PE).
+optional_header: OptionalHeader,
 /// A list of all Coff object files to be linked
 objects: std.ArrayListUnmanaged(Coff) = .{},
 /// List of synthetic symbols
@@ -44,6 +51,52 @@ managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 /// Possible user configuration options
 const Options = struct {};
 
+const OptionalHeader = struct {
+    magic: u16,
+    major_version: u8,
+    minor_version: u8,
+    size_of_code: u32,
+    size_of_initialized_data: u32,
+    size_of_uninitialized_data: u32,
+    address_of_entry_point: u32,
+    base_of_code: u32,
+
+    // Only set (and emit) for PE32 files, and absent in PE32+ files.
+    base_of_data: u32,
+
+    // Windows-Specific fields
+    image_base: u64,
+    section_alignment: u32,
+    file_alignment: u32 = 512,
+    major_os_version: u16,
+    minor_os_version: u16,
+    major_img_version: u16,
+    minor_img_version: u16,
+    major_sub_version: u16,
+    minor_sub_version: u16,
+    /// Reserved and must always be set to '0'
+    win32_version: u32 = 0,
+    size_of_image: u32,
+    size_of_headers: u32,
+    checksum: u32,
+    subsystem: u16,
+    dll_characteristics: u16,
+    size_of_stack_reserve: u64,
+    size_of_stack_commit: u64,
+    size_of_heap_reserve: u64,
+    size_of_heap_commit: u64,
+    /// Reserved and must always be set to '0'
+    loader_flags: u32 = 0,
+    /// Number of data-directory entries in the remainder of the
+    /// optional header, of which each describes a location and size.
+    number_of_rva_and_sizes: u32,
+};
+
+const DataDirectory = struct {
+    virtual_address: u32,
+    size: u32,
+};
+
 pub const SymbolWithLoc = struct {
     /// Index of the symbol entry within the object file
     index: u32,
@@ -62,13 +115,62 @@ pub const SymbolWithLoc = struct {
     }
 };
 
+/// Creates a new binary file, overwriting any existing file with the corresponding name.
+/// Then initializes all default values.
+///
+/// Cld has eclusive access to the output file, meaning it cannot be accessed by outside
+/// processes until `deinit` is called and all resources are deallocated.
 pub fn openPath(allocator: Allocator, path: []const u8, options: Options) !Cld {
     const file = try std.fs.cwd().createFile(path, .{ .lock = .Exclusive });
+    const stat = try file.stat();
+    const time_stamp = @divFloor(stat.ctime, std.time.ns_per_s);
+
     return Cld{
         .gpa = allocator,
         .name = path,
         .options = options,
         .file = file,
+        .coff_header = .{
+            .machine = std.coff.MachineType.X64, // TODO: Make this dynamic, based on target
+            .number_of_sections = 0,
+            .timedate_stamp = @truncate(u32, @intCast(u64, time_stamp)),
+            .pointer_to_symbol_table = 0,
+            .number_of_symbols = 0,
+            .size_of_optional_header = 0,
+            .characteristics = 0,
+        },
+        .optional_header = .{
+            .magic = 0x20b, // PE32+, TODO: Make this dynamic, based on target
+            .major_version = 0,
+            .minor_version = 0,
+            .size_of_code = 0,
+            .size_of_initialized_data = 0,
+            .size_of_uninitialized_data = 0,
+            .address_of_entry_point = 0,
+            .base_of_code = 0,
+            .base_of_data = 0,
+            .image_base = 0,
+            .section_alignment = 0,
+            .file_alignment = 512,
+            .major_os_version = 0,
+            .minor_os_version = 0,
+            .major_img_version = 0,
+            .minor_img_version = 0,
+            .major_sub_version = 0,
+            .minor_sub_version = 0,
+            .win32_version = 0,
+            .size_of_image = 0,
+            .size_of_headers = 0,
+            .checksum = 0,
+            .subsystem = 0,
+            .dll_characteristics = 0,
+            .size_of_stack_reserve = 0,
+            .size_of_stack_commit = 0,
+            .size_of_heap_reserve = 0,
+            .size_of_heap_commit = 0,
+            .loader_flags = 0,
+            .number_of_rva_and_sizes = 0,
+        },
     };
 }
 
@@ -339,6 +441,7 @@ fn allocateSections(cld: *Cld) !void {
             continue;
         }
         offset += 40; // each header takes up 40 bytes
+        cld.coff_header.number_of_sections += 1;
     }
 
     // as we now have the full offset, we can start to visually allocate all sections
@@ -346,6 +449,22 @@ fn allocateSections(cld: *Cld) !void {
     for (cld.section_headers.items) |*hdr| {
         hdr.pointer_to_raw_data = offset;
         offset += hdr.size_of_raw_data;
+
+        const hdr_name = cld.getString(hdr.name);
+
+        if (std.mem.eql(u8, hdr_name, ".text")) {
+            cld.optional_header.base_of_code = hdr.pointer_to_raw_data;
+        } else if (std.mem.eql(u8, hdr_name, ".data")) {
+            cld.optional_header.base_of_data = hdr.pointer_to_raw_data;
+        }
+
+        if (hdr.characteristics & Coff.SectionHeader.flags.IMAGE_SCN_CNT_CODE != 0) {
+            cld.optional_header.size_of_code += hdr.size_of_raw_data;
+        } else if (hdr.characteristics & Coff.SectionHeader.flags.IMAGE_SCN_CNT_INITIALIZED_DATA != 0) {
+            cld.optional_header.size_of_initialized_data += hdr.size_of_raw_data;
+        } else if (hdr.characteristics & Coff.SectionHeader.flags.IMAGE_SCN_CNT_UNINITIALIZED_DATA != 0) {
+            cld.optional_header.size_of_uninitialized_data += hdr.size_of_raw_data;
+        }
 
         if (!hdr.isGrouped()) {
             log.debug("  allocated section '{s}' from 0x{x:0>8} to 0x{x:0>8}", .{
@@ -400,4 +519,39 @@ fn allocateAtoms(cld: *Cld) !void {
             atom = atom.next orelse break;
         }
     }
+}
+
+fn emitImageFile(cld: *Cld) !void {
+    var writer_list = std.ArrayList(u8).init(cld.gpa);
+    defer writer_list.deinit();
+    const writer = writer_list.writer();
+    _ = writer;
+
+    // no linker-errors, so update flags
+    cld.coff_header.characteristics |= std.coff.IMAGE_FILE_EXECUTABLE_IMAGE;
+    if (cld.optional_header.magic == 0x2b) {
+        cld.coff_header.characteristics |= std.coff.IMAGE_FILE_LARGE_ADDRESS_AWARE;
+    }
+
+    try writeDosHeader(writer);
+    try writeFileHeader(cld.coff_header, writer);
+}
+
+const dos_program = [_]u8{
+    0x0e, 0x1f, 0xba, 0x0e, 0x00, 0xb4, 0x09, 0xcd,
+    0x21, 0xb8, 0x01, 0x4c, 0xcd, 0x21, 0x54, 0x68,
+    0x69, 0x73, 0x20, 0x70, 0x72, 0x6f, 0x67, 0x72,
+    0x61, 0x6d, 0x20, 0x63, 0x61, 0x6e, 0x6e, 0x6f,
+    0x74, 0x20, 0x62, 0x65, 0x20, 0x72, 0x75, 0x6e,
+    0x20, 0x69, 0x6e, 0x20, 0x44, 0x4f, 0x53, 0x20,
+    0x6d, 0x6f, 0x64, 0x65, 0x2e, 0x24, 0x00, 0x00,
+};
+
+fn writeDosHeader(writer: anytype) !void {
+    _ = writer;
+}
+
+fn writeFileHeader(header: Coff.Header, writer: anytype) !void {
+    _ = header;
+    _ = writer;
 }
