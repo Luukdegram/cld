@@ -373,7 +373,8 @@ fn allocateAtoms(cld: *Cld) !void {
             const coff: *Coff = &cld.objects.items[atom.file];
             const sym: *Coff.Symbol = &coff.symbols.items[atom.sym_index];
 
-            sym.value = base_offset;
+            std.debug.assert(sym.value == 0); // section symbols always have their `value` set to 0.
+
             sym.section_number = @intCast(i16, section_index + 1); // section numbers are 1-indexed.
 
             log.debug("  atom '{s}' allocated from 0x{x:0>8} to 0x{x:0>8}", .{
