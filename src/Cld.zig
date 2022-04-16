@@ -121,11 +121,15 @@ pub fn flush(cld: *Cld) !void {
         try resolveSymbolsInObject(cld, @intCast(u16, idx));
     }
 
+    // TODO: Emit unresolved symbols and error out
+
     for (cld.objects.items) |object, idx| {
         try Coff.parseIntoAtoms(object, cld, @intCast(u16, idx));
     }
 
     try sortSections(cld);
+    try allocateSections(cld);
+    try allocateAtoms(cld);
 }
 
 /// Resolves symbols in given object file index.
@@ -296,3 +300,103 @@ const SectionSortContext = struct {
         return lhs_val < rhs_val;
     }
 };
+
+/// From a given section name, returns the short section name.
+/// This is useful to determine which section a grouped section belongs to.
+/// e.g. .text$X beloging to the .text section.
+fn sectionShortName(name: []const u8) []const u8 {
+    const startsWith = std.mem.startsWith;
+    if (startsWith(u8, name, ".text")) {
+        return ".text";
+    } else if (startsWith(u8, name, ".data")) {
+        return ".data";
+    } else if (startsWith(u8, name, ".bss")) {
+        return ".bss";
+    } else if (startsWith(u8, name, ".xdata")) {
+        return ".xdata";
+    } else if (startsWith(u8, name, ".rdata")) {
+        return ".rdata";
+    } else if (startsWith(u8, name, ".tls")) {
+        return ".tls";
+    } else if (startsWith(u8, name, ".debug")) {
+        return ".debug";
+    } else if (startsWith(u8, name, ".pdata")) {
+        return ".pdata";
+    } else std.debug.panic("TODO: shortname of section named: '{s}'\n", .{name});
+    unreachable;
+}
+
+fn allocateSections(cld: *Cld) !void {
+    const signature_offset_at = 0x3c;
+    var offset: u32 = signature_offset_at + 8; // 4 bytes for "PE\0\0" and another 4 for the offset.
+    offset += 20; // space for the COFF File Header
+    offset += 120; // space for optional header
+
+    log.debug("allocating sections, starting at offset: 0x{x:0>4}", .{offset});
+
+    for (cld.section_headers.items) |hdr| {
+        if (hdr.isGrouped()) {
+            continue;
+        }
+        offset += 40; // each header takes up 40 bytes
+    }
+
+    // as we now have the full offset, we can start to visually allocate all sections
+    // into the binary
+    for (cld.section_headers.items) |*hdr| {
+        hdr.pointer_to_raw_data = offset;
+        offset += hdr.size_of_raw_data;
+
+        if (!hdr.isGrouped()) {
+            log.debug("  allocated section '{s}' from 0x{x:0>8} to 0x{x:0>8}", .{
+                cld.getString(hdr.name),
+                hdr.pointer_to_raw_data,
+                hdr.pointer_to_raw_data + hdr.size_of_raw_data,
+            });
+        }
+    }
+}
+
+fn allocateAtoms(cld: *Cld) !void {
+    var it = cld.atoms.iterator();
+    while (it.next()) |entry| {
+        const section_index = entry.key_ptr.*;
+        const hdr: Coff.SectionHeader = cld.section_headers.items[section_index];
+        var atom: *Atom = entry.value_ptr.*.getFirst();
+
+        log.debug("allocating atoms in section '{s}'", .{cld.getString(hdr.name)});
+
+        var base_offset = hdr.pointer_to_raw_data;
+        while (true) {
+            base_offset = std.mem.alignForwardGeneric(u32, base_offset, atom.alignment);
+
+            const coff: *Coff = &cld.objects.items[atom.file];
+            const sym: *Coff.Symbol = &coff.symbols.items[atom.sym_index];
+
+            sym.value = base_offset;
+            sym.section_number = @intCast(i16, section_index + 1); // section numbers are 1-indexed.
+
+            log.debug("  atom '{s}' allocated from 0x{x:0>8} to 0x{x:0>8}", .{
+                coff.getString(sym.name),
+                base_offset,
+                base_offset + atom.size,
+            });
+
+            for (atom.aliases.items) |sym_index| {
+                const alias = &coff.symbols.items[sym_index];
+                alias.value = base_offset;
+                alias.section_number = sym.section_number;
+            }
+
+            for (atom.contained.items) |sym_at_offset| {
+                const contained_sym = &coff.symbols.items[sym_at_offset.sym_index];
+                contained_sym.value = base_offset + sym_at_offset.offset;
+                contained_sym.section_number = sym.section_number;
+            }
+
+            base_offset += atom.size;
+
+            atom = atom.next orelse break;
+        }
+    }
+}

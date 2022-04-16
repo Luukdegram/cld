@@ -576,6 +576,7 @@ pub fn parseIntoAtoms(coff: Coff, cld: *Cld, object_index: u16) !void {
             target_section.size_of_raw_data,
             atom.alignment,
         ) + atom.size, target_section.alignment);
+        target_section.virtual_size = target_section.size_of_raw_data;
 
         if (cld.atoms.getPtr(target_section_index)) |last| {
             last.*.next = atom;
