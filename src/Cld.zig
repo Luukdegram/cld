@@ -138,7 +138,7 @@ pub fn openPath(allocator: Allocator, path: []const u8, options: Options) !Cld {
             .timedate_stamp = @truncate(u32, @intCast(u64, time_stamp)),
             .pointer_to_symbol_table = 0,
             .number_of_symbols = 0,
-            .size_of_optional_header = 0,
+            .size_of_optional_header = 112 + @sizeOf(DataDirectory) * number_of_data_directory,
             .characteristics = 0,
         },
         .optional_header = .{
@@ -432,10 +432,9 @@ fn sectionShortName(name: []const u8) []const u8 {
 }
 
 fn allocateSections(cld: *Cld) !void {
-    const signature_offset_at = 0x3c;
-    var offset: u32 = signature_offset_at + 8; // 4 bytes for "PE\0\0" and another 4 for the offset.
-    offset += 20; // space for the COFF File Header
-    offset += 120; // space for optional header
+    var offset: u32 = Coff.dos_stub_size +
+        @sizeOf(Coff.Header) +
+        cld.coff_header.size_of_optional_header;
 
     log.debug("allocating sections, starting at offset: 0x{x:0>4}", .{offset});
 
