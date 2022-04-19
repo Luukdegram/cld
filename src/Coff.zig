@@ -61,10 +61,6 @@ pub const OptionalHeader = struct {
     size_of_uninitialized_data: u32,
     address_of_entry_point: u32,
     base_of_code: u32,
-
-    // Only set (and emit) for PE32 files, and absent in PE32+ files.
-    base_of_data: u32,
-
     // Windows-Specific fields
     image_base: u64,
     section_alignment: u32,

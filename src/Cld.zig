@@ -119,7 +119,6 @@ pub fn openPath(allocator: Allocator, path: []const u8, options: Options) !Cld {
             .size_of_uninitialized_data = 0,
             .address_of_entry_point = 0,
             .base_of_code = 0,
-            .base_of_data = 0,
             .image_base = 0,
             .section_alignment = 0,
             .file_alignment = 512,
@@ -402,6 +401,7 @@ fn sectionShortName(name: []const u8) []const u8 {
 
 fn allocateSections(cld: *Cld) !void {
     var offset: u32 = dos_stub_size +
+        @sizeOf(@TypeOf(Coff.pe_magic)) +
         @sizeOf(Coff.Header) +
         cld.coff_header.size_of_optional_header;
 
@@ -425,9 +425,10 @@ fn allocateSections(cld: *Cld) !void {
 
         if (std.mem.eql(u8, hdr_name, ".text")) {
             cld.optional_header.base_of_code = hdr.pointer_to_raw_data;
-        } else if (std.mem.eql(u8, hdr_name, ".data")) {
-            cld.optional_header.base_of_data = hdr.pointer_to_raw_data;
         }
+        // else if (std.mem.eql(u8, hdr_name, ".data")) {
+        //     cld.optional_header.base_of_data = hdr.pointer_to_raw_data;
+        // }
 
         if (hdr.characteristics & Coff.SectionHeader.flags.IMAGE_SCN_CNT_CODE != 0) {
             cld.optional_header.size_of_code += hdr.size_of_raw_data;
@@ -445,6 +446,8 @@ fn allocateSections(cld: *Cld) !void {
             });
         }
     }
+
+    cld.optional_header.size_of_headers = std.mem.alignForwardGeneric(u32, offset, 512);
 }
 
 fn allocateAtoms(cld: *Cld) !void {
@@ -533,6 +536,5 @@ fn writeFileHeader(header: Coff.Header, writer: anytype) !void {
 }
 
 fn writeOptionalHeader(header: Coff.OptionalHeader, writer: anytype) !void {
-    _ = header;
-    _ = writer;
+    try writer.writeAll(std.mem.asBytes(&header));
 }
