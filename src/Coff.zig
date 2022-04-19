@@ -20,7 +20,7 @@ relocations: std.AutoHashMapUnmanaged(u16, []const Relocation) = .{},
 symbols: std.ArrayListUnmanaged(Symbol) = .{},
 string_table: []const u8,
 
-pub const Header = struct {
+pub const Header = extern struct {
     machine: std.coff.MachineType,
     number_of_sections: u16,
     timedate_stamp: u32,
@@ -28,6 +28,47 @@ pub const Header = struct {
     number_of_symbols: u32,
     size_of_optional_header: u16,
     characteristics: u16,
+};
+
+pub const DosHeader = extern struct {
+    magic: [2]u8,
+    used_bytes_last_page: u16,
+    file_size_pages: u16,
+    numberOfRelocationItems: u16,
+    header_size_paragraphs: u16,
+    minimum_extra_paragaphs: u16,
+    maximum_extra_paragraphs: u16,
+    initial_relative_ss: u16,
+    initial_sp: u16,
+    checksum: u16,
+    initial_ip: u16,
+    initial_relative_cs: u16,
+    address_of_relocation_table: u16,
+    overlay_number: u16,
+    reserved: [4]u16,
+    oem_id: u16,
+    oem_info: u16,
+    reserved2: [10]u16,
+    address_of_header: u32,
+};
+
+pub const dos_stub_size = @sizeOf(DosHeader) + @sizeOf(@TypeOf(dos_program));
+comptime {
+    std.debug.assert(@sizeOf(DosHeader) == 64);
+}
+
+pub const pe_magic: [4]u8 = .{ 'P', 'E', 0, 0 };
+
+/// Dos stub that prints "This program cannot be run in DOS mode."
+/// This stub will be inserted at the start of the binary, before all other sections.
+pub const dos_program = [_]u8{
+    0x0e, 0x1f, 0xba, 0x0e, 0x00, 0xb4, 0x09, 0xcd,
+    0x21, 0xb8, 0x01, 0x4c, 0xcd, 0x21, 0x54, 0x68,
+    0x69, 0x73, 0x20, 0x70, 0x72, 0x6f, 0x67, 0x72,
+    0x61, 0x6d, 0x20, 0x63, 0x61, 0x6e, 0x6e, 0x6f,
+    0x74, 0x20, 0x62, 0x65, 0x20, 0x72, 0x75, 0x6e,
+    0x20, 0x69, 0x6e, 0x20, 0x44, 0x4f, 0x53, 0x20,
+    0x6d, 0x6f, 0x64, 0x65, 0x2e, 0x24, 0x00, 0x00,
 };
 
 pub const Section = struct {

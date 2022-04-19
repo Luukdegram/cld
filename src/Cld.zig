@@ -97,6 +97,8 @@ const DataDirectory = struct {
     size: u32,
 };
 
+const number_of_data_directory = 16;
+
 pub const SymbolWithLoc = struct {
     /// Index of the symbol entry within the object file
     index: u32,
@@ -232,6 +234,7 @@ pub fn flush(cld: *Cld) !void {
     try sortSections(cld);
     try allocateSections(cld);
     try allocateAtoms(cld);
+    try emitImageFile(cld);
 }
 
 /// Resolves symbols in given object file index.
@@ -535,23 +538,27 @@ fn emitImageFile(cld: *Cld) !void {
 
     try writeDosHeader(writer);
     try writeFileHeader(cld.coff_header, writer);
+
+    try cld.file.writevAll(&[_]std.os.iovec_const{
+        .{ .iov_base = writer_list.items.ptr, .iov_len = writer_list.items.len },
+    });
 }
 
-const dos_program = [_]u8{
-    0x0e, 0x1f, 0xba, 0x0e, 0x00, 0xb4, 0x09, 0xcd,
-    0x21, 0xb8, 0x01, 0x4c, 0xcd, 0x21, 0x54, 0x68,
-    0x69, 0x73, 0x20, 0x70, 0x72, 0x6f, 0x67, 0x72,
-    0x61, 0x6d, 0x20, 0x63, 0x61, 0x6e, 0x6e, 0x6f,
-    0x74, 0x20, 0x62, 0x65, 0x20, 0x72, 0x75, 0x6e,
-    0x20, 0x69, 0x6e, 0x20, 0x44, 0x4f, 0x53, 0x20,
-    0x6d, 0x6f, 0x64, 0x65, 0x2e, 0x24, 0x00, 0x00,
-};
-
 fn writeDosHeader(writer: anytype) !void {
-    _ = writer;
+    var header: Coff.DosHeader = std.mem.zeroInit(Coff.DosHeader, .{});
+    header.magic = .{ 'M', 'Z' };
+    header.used_bytes_last_page = Coff.dos_stub_size % 512;
+    header.file_size_pages = try std.math.divCeil(u16, Coff.dos_stub_size, 512);
+    header.header_size_paragraphs = @sizeOf(Coff.DosHeader) / 16;
+    header.address_of_relocation_table = @sizeOf(Coff.DosHeader);
+    header.address_of_header = Coff.dos_stub_size;
+
+    // TODO: Byteswap the header when target compilation is big-endian
+    try writer.writeAll(std.mem.asBytes(&header));
+    try writer.writeAll(&Coff.dos_program);
 }
 
 fn writeFileHeader(header: Coff.Header, writer: anytype) !void {
-    _ = header;
-    _ = writer;
+    try writer.writeAll(&Coff.pe_magic);
+    try writer.writeAll(std.mem.asBytes(&header));
 }
