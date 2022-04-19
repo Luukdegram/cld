@@ -23,7 +23,7 @@ coff_header: Coff.Header,
 /// The optional header provides information to the loader.
 /// While named optional it's not optional for the final binary
 /// when building an image file (PE).
-optional_header: OptionalHeader,
+optional_header: Coff.OptionalHeader,
 /// A list of all Coff object files to be linked
 objects: std.ArrayListUnmanaged(Coff) = .{},
 /// List of synthetic symbols
@@ -51,53 +51,22 @@ managed_atoms: std.ArrayListUnmanaged(*Atom) = .{},
 /// Possible user configuration options
 const Options = struct {};
 
-const OptionalHeader = struct {
-    magic: u16,
-    major_version: u8,
-    minor_version: u8,
-    size_of_code: u32,
-    size_of_initialized_data: u32,
-    size_of_uninitialized_data: u32,
-    address_of_entry_point: u32,
-    base_of_code: u32,
-
-    // Only set (and emit) for PE32 files, and absent in PE32+ files.
-    base_of_data: u32,
-
-    // Windows-Specific fields
-    image_base: u64,
-    section_alignment: u32,
-    file_alignment: u32 = 512,
-    major_os_version: u16,
-    minor_os_version: u16,
-    major_img_version: u16,
-    minor_img_version: u16,
-    major_sub_version: u16,
-    minor_sub_version: u16,
-    /// Reserved and must always be set to '0'
-    win32_version: u32 = 0,
-    size_of_image: u32,
-    size_of_headers: u32,
-    checksum: u32,
-    subsystem: u16,
-    dll_characteristics: u16,
-    size_of_stack_reserve: u64,
-    size_of_stack_commit: u64,
-    size_of_heap_reserve: u64,
-    size_of_heap_commit: u64,
-    /// Reserved and must always be set to '0'
-    loader_flags: u32 = 0,
-    /// Number of data-directory entries in the remainder of the
-    /// optional header, of which each describes a location and size.
-    number_of_rva_and_sizes: u32,
-};
-
-const DataDirectory = struct {
-    virtual_address: u32,
-    size: u32,
-};
-
 const number_of_data_directory = 16;
+pub const dos_stub_size = @sizeOf(Coff.DosHeader) + @sizeOf(@TypeOf(dos_program));
+comptime {
+    std.debug.assert(@sizeOf(Coff.DosHeader) == 64);
+}
+/// Dos stub that prints "This program cannot be run in DOS mode."
+/// This stub will be inserted at the start of the binary, before all other sections.
+pub const dos_program = [_]u8{
+    0x0e, 0x1f, 0xba, 0x0e, 0x00, 0xb4, 0x09, 0xcd,
+    0x21, 0xb8, 0x01, 0x4c, 0xcd, 0x21, 0x54, 0x68,
+    0x69, 0x73, 0x20, 0x70, 0x72, 0x6f, 0x67, 0x72,
+    0x61, 0x6d, 0x20, 0x63, 0x61, 0x6e, 0x6e, 0x6f,
+    0x74, 0x20, 0x62, 0x65, 0x20, 0x72, 0x75, 0x6e,
+    0x20, 0x69, 0x6e, 0x20, 0x44, 0x4f, 0x53, 0x20,
+    0x6d, 0x6f, 0x64, 0x65, 0x2e, 0x24, 0x00, 0x00,
+};
 
 pub const SymbolWithLoc = struct {
     /// Index of the symbol entry within the object file
@@ -138,7 +107,7 @@ pub fn openPath(allocator: Allocator, path: []const u8, options: Options) !Cld {
             .timedate_stamp = @truncate(u32, @intCast(u64, time_stamp)),
             .pointer_to_symbol_table = 0,
             .number_of_symbols = 0,
-            .size_of_optional_header = 112 + @sizeOf(DataDirectory) * number_of_data_directory,
+            .size_of_optional_header = 112 + @sizeOf(Coff.DataDirectory) * number_of_data_directory,
             .characteristics = 0,
         },
         .optional_header = .{
@@ -432,7 +401,7 @@ fn sectionShortName(name: []const u8) []const u8 {
 }
 
 fn allocateSections(cld: *Cld) !void {
-    var offset: u32 = Coff.dos_stub_size +
+    var offset: u32 = dos_stub_size +
         @sizeOf(Coff.Header) +
         cld.coff_header.size_of_optional_header;
 
@@ -537,6 +506,7 @@ fn emitImageFile(cld: *Cld) !void {
 
     try writeDosHeader(writer);
     try writeFileHeader(cld.coff_header, writer);
+    try writeOptionalHeader(cld.optional_header, writer);
 
     try cld.file.writevAll(&[_]std.os.iovec_const{
         .{ .iov_base = writer_list.items.ptr, .iov_len = writer_list.items.len },
@@ -546,18 +516,23 @@ fn emitImageFile(cld: *Cld) !void {
 fn writeDosHeader(writer: anytype) !void {
     var header: Coff.DosHeader = std.mem.zeroInit(Coff.DosHeader, .{});
     header.magic = .{ 'M', 'Z' };
-    header.used_bytes_last_page = Coff.dos_stub_size % 512;
-    header.file_size_pages = try std.math.divCeil(u16, Coff.dos_stub_size, 512);
+    header.used_bytes_last_page = dos_stub_size % 512;
+    header.file_size_pages = try std.math.divCeil(u16, dos_stub_size, 512);
     header.header_size_paragraphs = @sizeOf(Coff.DosHeader) / 16;
     header.address_of_relocation_table = @sizeOf(Coff.DosHeader);
-    header.address_of_header = Coff.dos_stub_size;
+    header.address_of_header = dos_stub_size;
 
     // TODO: Byteswap the header when target compilation is big-endian
     try writer.writeAll(std.mem.asBytes(&header));
-    try writer.writeAll(&Coff.dos_program);
+    try writer.writeAll(&dos_program);
 }
 
 fn writeFileHeader(header: Coff.Header, writer: anytype) !void {
     try writer.writeAll(&Coff.pe_magic);
     try writer.writeAll(std.mem.asBytes(&header));
+}
+
+fn writeOptionalHeader(header: Coff.OptionalHeader, writer: anytype) !void {
+    _ = header;
+    _ = writer;
 }

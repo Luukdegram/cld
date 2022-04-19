@@ -52,24 +52,53 @@ pub const DosHeader = extern struct {
     address_of_header: u32,
 };
 
-pub const dos_stub_size = @sizeOf(DosHeader) + @sizeOf(@TypeOf(dos_program));
-comptime {
-    std.debug.assert(@sizeOf(DosHeader) == 64);
-}
+pub const OptionalHeader = struct {
+    magic: u16,
+    major_version: u8,
+    minor_version: u8,
+    size_of_code: u32,
+    size_of_initialized_data: u32,
+    size_of_uninitialized_data: u32,
+    address_of_entry_point: u32,
+    base_of_code: u32,
+
+    // Only set (and emit) for PE32 files, and absent in PE32+ files.
+    base_of_data: u32,
+
+    // Windows-Specific fields
+    image_base: u64,
+    section_alignment: u32,
+    file_alignment: u32 = 512,
+    major_os_version: u16,
+    minor_os_version: u16,
+    major_img_version: u16,
+    minor_img_version: u16,
+    major_sub_version: u16,
+    minor_sub_version: u16,
+    /// Reserved and must always be set to '0'
+    win32_version: u32 = 0,
+    size_of_image: u32,
+    size_of_headers: u32,
+    checksum: u32,
+    subsystem: u16,
+    dll_characteristics: u16,
+    size_of_stack_reserve: u64,
+    size_of_stack_commit: u64,
+    size_of_heap_reserve: u64,
+    size_of_heap_commit: u64,
+    /// Reserved and must always be set to '0'
+    loader_flags: u32 = 0,
+    /// Number of data-directory entries in the remainder of the
+    /// optional header, of which each describes a location and size.
+    number_of_rva_and_sizes: u32,
+};
+
+pub const DataDirectory = extern struct {
+    virtual_address: u32,
+    size: u32,
+};
 
 pub const pe_magic: [4]u8 = .{ 'P', 'E', 0, 0 };
-
-/// Dos stub that prints "This program cannot be run in DOS mode."
-/// This stub will be inserted at the start of the binary, before all other sections.
-pub const dos_program = [_]u8{
-    0x0e, 0x1f, 0xba, 0x0e, 0x00, 0xb4, 0x09, 0xcd,
-    0x21, 0xb8, 0x01, 0x4c, 0xcd, 0x21, 0x54, 0x68,
-    0x69, 0x73, 0x20, 0x70, 0x72, 0x6f, 0x67, 0x72,
-    0x61, 0x6d, 0x20, 0x63, 0x61, 0x6e, 0x6e, 0x6f,
-    0x74, 0x20, 0x62, 0x65, 0x20, 0x72, 0x75, 0x6e,
-    0x20, 0x69, 0x6e, 0x20, 0x44, 0x4f, 0x53, 0x20,
-    0x6d, 0x6f, 0x64, 0x65, 0x2e, 0x24, 0x00, 0x00,
-};
 
 pub const Section = struct {
     ptr: [*]const u8,
