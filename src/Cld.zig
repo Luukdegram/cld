@@ -509,7 +509,8 @@ fn emitImageFile(cld: *Cld) !void {
 
     try writeDosHeader(writer);
     try writeFileHeader(cld.coff_header, writer);
-    try writeOptionalHeader(cld.optional_header, writer);
+    try writeOptionalHeader(cld.*, writer);
+    try writeSections(cld.*, writer);
 
     try cld.file.writevAll(&[_]std.os.iovec_const{
         .{ .iov_base = writer_list.items.ptr, .iov_len = writer_list.items.len },
@@ -535,6 +536,38 @@ fn writeFileHeader(header: Coff.Header, writer: anytype) !void {
     try writer.writeAll(std.mem.asBytes(&header));
 }
 
-fn writeOptionalHeader(header: Coff.OptionalHeader, writer: anytype) !void {
-    try writer.writeAll(std.mem.asBytes(&header));
+fn writeOptionalHeader(cld: Cld, writer: anytype) !void {
+    try writer.writeAll(std.mem.asBytes(&cld.optional_header));
+    // TODO: Actually write to each directory when data is known
+    var directories = [_]u8{0} ** (@sizeOf(Coff.DataDirectory) * number_of_data_directory);
+    try writer.writeAll(&directories);
+}
+
+fn writeSections(cld: Cld, writer: anytype) !void {
+    for (cld.section_headers.items) |hdr| {
+        try writer.writeAll(&hdr.name);
+        try writer.writeIntLittle(u32, hdr.virtual_size);
+        try writer.writeIntLittle(u32, hdr.virtual_address);
+        try writer.writeIntLittle(u32, hdr.size_of_raw_data);
+        try writer.writeIntLittle(u32, hdr.pointer_to_raw_data);
+        try writer.writeIntLittle(u32, hdr.pointer_to_relocations);
+        try writer.writeIntLittle(u32, hdr.pointer_to_line_numbers);
+        try writer.writeIntLittle(u16, hdr.number_of_relocations);
+        try writer.writeIntLittle(u16, hdr.number_of_line_numbers);
+        try writer.writeIntLittle(u32, hdr.characteristics);
+    }
+
+    var it = cld.atoms.valueIterator();
+    while (it.next()) |last_atom| {
+        var atom: *Atom = last_atom.*.getFirst();
+        while (true) {
+            const size = std.mem.alignForwardGeneric(u32, atom.size, atom.alignment);
+            // TODO: Perform relocations before writing
+            try writer.writeAll(atom.code.items);
+            if (size > atom.size) {
+                try writer.writeByteNTimes(0, size - atom.size);
+            }
+            atom = atom.next orelse break;
+        }
+    }
 }

@@ -115,7 +115,7 @@ pub const Relocation = struct {
     tag: u16,
 };
 
-pub const Symbol = struct {
+pub const Symbol = extern struct {
     name: [8]u8,
     value: u32,
     section_number: i16,
@@ -517,7 +517,7 @@ fn parseSectionData(coff: *Coff) !void {
     const reader = coff.file.reader();
     for (coff.section_table.items) |sec_header| {
         try coff.file.seekTo(sec_header.pointer_to_raw_data);
-        const buf = try coff.allocator.alloc(u8, sec_header.virtual_size);
+        const buf = try coff.allocator.alloc(u8, sec_header.size_of_raw_data);
         try reader.readNoEof(buf);
         coff.sections.appendAssumeCapacity(Section.fromSlice(buf));
     }
