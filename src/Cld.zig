@@ -511,6 +511,7 @@ fn emitImageFile(cld: *Cld) !void {
     try writeFileHeader(cld.coff_header, writer);
     try writeOptionalHeader(cld.*, writer);
     try writeSections(cld.*, writer);
+    try writeStringtable(cld.*, writer);
 
     try cld.file.writevAll(&[_]std.os.iovec_const{
         .{ .iov_base = writer_list.items.ptr, .iov_len = writer_list.items.len },
@@ -570,4 +571,11 @@ fn writeSections(cld: Cld, writer: anytype) !void {
             atom = atom.next orelse break;
         }
     }
+}
+
+fn writeStringtable(cld: Cld, writer: anytype) !void {
+    const size = @intCast(u32, cld.string_table.items.len) + 4; // 4 bytes for size field itself
+    try writer.writeIntLittle(u32, size);
+    if (size == 4) return;
+    try writer.writeAll(cld.string_table.items);
 }

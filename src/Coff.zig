@@ -438,6 +438,7 @@ fn parseStringTable(coff: *Coff) !void {
     const current_pos = try coff.file.getPos();
     try coff.file.seekTo(coff.stringTableOffset());
     const size = try reader.readIntLittle(u32);
+    if (size == 0) return;
     const buffer = try coff.allocator.alloc(u8, size - 4); // account for 4 bytes of size field itself
     errdefer coff.allocator.free(buffer);
     try reader.readNoEof(buffer);
