@@ -56,6 +56,7 @@ pub const dos_stub_size = @sizeOf(Coff.DosHeader) + @sizeOf(@TypeOf(dos_program)
 comptime {
     std.debug.assert(@sizeOf(Coff.DosHeader) == 64);
 }
+
 /// Dos stub that prints "This program cannot be run in DOS mode."
 /// This stub will be inserted at the start of the binary, before all other sections.
 pub const dos_program = [_]u8{
@@ -112,21 +113,21 @@ pub fn openPath(allocator: Allocator, path: []const u8, options: Options) !Cld {
         },
         .optional_header = .{
             .magic = 0x20b, // PE32+, TODO: Make this dynamic, based on target
-            .major_version = 0,
+            .major_version = 14, // Output from VS2015. When this is '0' it fails to validate on Windows 7.
             .minor_version = 0,
             .size_of_code = 0,
             .size_of_initialized_data = 0,
             .size_of_uninitialized_data = 0,
             .address_of_entry_point = 0,
             .base_of_code = 0,
-            .image_base = 0,
-            .section_alignment = 0,
+            .image_base = 0x140000000,
+            .section_alignment = 4096,
             .file_alignment = 512,
-            .major_os_version = 0,
+            .major_os_version = 6,
             .minor_os_version = 0,
             .major_img_version = 0,
             .minor_img_version = 0,
-            .major_sub_version = 0,
+            .major_sub_version = 6,
             .minor_sub_version = 0,
             .win32_version = 0,
             .size_of_image = 0,
@@ -134,10 +135,10 @@ pub fn openPath(allocator: Allocator, path: []const u8, options: Options) !Cld {
             .checksum = 0,
             .subsystem = 0,
             .dll_characteristics = 0,
-            .size_of_stack_reserve = 0,
-            .size_of_stack_commit = 0,
-            .size_of_heap_reserve = 0,
-            .size_of_heap_commit = 0,
+            .size_of_stack_reserve = 1024 * 1024,
+            .size_of_stack_commit = 4096,
+            .size_of_heap_reserve = 1024 * 1024,
+            .size_of_heap_commit = 4096,
             .loader_flags = 0,
             .number_of_rva_and_sizes = 0,
         },
@@ -451,48 +452,67 @@ fn allocateSections(cld: *Cld) !void {
 }
 
 fn allocateAtoms(cld: *Cld) !void {
+    if (cld.coff_header.number_of_sections == 0) return;
+    // TODO: Merge allocateAtoms with allocateSections
+    var size_of_headers = cld.section_headers.items[0].pointer_to_raw_data;
+    size_of_headers = std.mem.alignForwardGeneric(u32, size_of_headers, 4096);
+    var file_size = size_of_headers;
+    var rva = std.mem.alignForwardGeneric(u32, size_of_headers, 4096); // TODO: Get alignment from configuration
+
     var it = cld.atoms.iterator();
     while (it.next()) |entry| {
         const section_index = entry.key_ptr.*;
-        const hdr: Coff.SectionHeader = cld.section_headers.items[section_index];
+        const hdr: *Coff.SectionHeader = &cld.section_headers.items[section_index];
+        hdr.virtual_address = rva;
+
         var atom: *Atom = entry.value_ptr.*.getFirst();
+        var raw_size: u32 = 0;
+        var virtual_size: u32 = 0;
 
         log.debug("allocating atoms in section '{s}'", .{cld.getString(hdr.name)});
 
-        var base_offset = hdr.pointer_to_raw_data;
         while (true) {
-            base_offset = std.mem.alignForwardGeneric(u32, base_offset, atom.alignment);
+            virtual_size = std.mem.alignForwardGeneric(u32, virtual_size, atom.alignment);
 
-            const coff: *Coff = &cld.objects.items[atom.file];
-            const sym: *Coff.Symbol = &coff.symbols.items[atom.sym_index];
+            const symbol = atom.symLoc().getSymbol(cld);
+            symbol.value = rva + virtual_size;
+            virtual_size += atom.size;
+            raw_size = std.mem.alignForwardGeneric(u32, virtual_size, cld.optional_header.file_alignment);
 
-            std.debug.assert(sym.value == 0); // section symbols always have their `value` set to 0.
-
-            sym.section_number = @intCast(i16, section_index + 1); // section numbers are 1-indexed.
+            symbol.section_number = @intCast(i16, section_index + 1); // section numbers are 1-indexed.
 
             log.debug("  atom '{s}' allocated from 0x{x:0>8} to 0x{x:0>8}", .{
-                coff.getString(sym.name),
-                base_offset,
-                base_offset + atom.size,
+                cld.objects.items[atom.file].getString(symbol.name),
+                symbol.value,
+                symbol.value + atom.size,
             });
 
+            const coff = &cld.objects.items[atom.file];
             for (atom.aliases.items) |sym_index| {
                 const alias = &coff.symbols.items[sym_index];
-                alias.value = base_offset;
-                alias.section_number = sym.section_number;
+                alias.value = symbol.value;
+                alias.section_number = symbol.section_number;
             }
 
             for (atom.contained.items) |sym_at_offset| {
                 const contained_sym = &coff.symbols.items[sym_at_offset.sym_index];
-                contained_sym.value = base_offset + sym_at_offset.offset;
-                contained_sym.section_number = sym.section_number;
+                contained_sym.value = symbol.value + sym_at_offset.offset;
+                contained_sym.section_number = symbol.section_number;
             }
-
-            base_offset += atom.size;
 
             atom = atom.next orelse break;
         }
+
+        hdr.virtual_size = virtual_size;
+        hdr.size_of_raw_data = raw_size;
+        if (raw_size != 0) {
+            hdr.pointer_to_raw_data = file_size;
+        }
+        rva += std.mem.alignForwardGeneric(u32, virtual_size, 4096);
+        file_size += std.mem.alignForwardGeneric(u32, raw_size, 512);
     }
+
+    cld.optional_header.size_of_image = std.mem.alignForwardGeneric(u32, rva, 4096);
 }
 
 fn emitImageFile(cld: *Cld) !void {

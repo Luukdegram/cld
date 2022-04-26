@@ -369,6 +369,13 @@ pub const SectionHeader = struct {
     pub fn isGrouped(header: SectionHeader) bool {
         return std.mem.indexOfScalar(u8, &header.name, '$') != null;
     }
+
+    /// For a given section, returns true when the section is a code section.
+    pub fn isCodeSection(header: SectionHeader) bool {
+        return header.characteristics & flags.IMAGE_SCN_CNT_CODE and
+            header.characteristics & flags.IMAGE_SCN_MEM_READ and
+            header.characteristics & flags.IMAGE_SCN_MEM_EXECUTE;
+    }
 };
 
 /// Initializes a new `Coff` instance. The file will not be parsed yet.
