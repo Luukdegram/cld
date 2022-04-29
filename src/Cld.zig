@@ -201,7 +201,6 @@ pub fn flush(cld: *Cld) !void {
     }
 
     try sortSections(cld);
-    try allocateSections(cld);
     try allocateAtoms(cld);
     try emitImageFile(cld);
 }
@@ -400,13 +399,11 @@ fn sectionShortName(name: []const u8) []const u8 {
     unreachable;
 }
 
-fn allocateSections(cld: *Cld) !void {
+fn allocateAtoms(cld: *Cld) !void {
     var offset: u32 = dos_stub_size +
         @sizeOf(@TypeOf(Coff.pe_magic)) +
         @sizeOf(Coff.Header) +
         cld.coff_header.size_of_optional_header;
-
-    log.debug("allocating sections, starting at offset: 0x{x:0>4}", .{offset});
 
     for (cld.section_headers.items) |hdr| {
         if (hdr.isGrouped()) {
@@ -416,48 +413,12 @@ fn allocateSections(cld: *Cld) !void {
         cld.coff_header.number_of_sections += 1;
     }
 
-    // as we now have the full offset, we can start to visually allocate all sections
-    // into the binary
-    for (cld.section_headers.items) |*hdr| {
-        hdr.pointer_to_raw_data = offset;
-        offset += hdr.size_of_raw_data;
+    offset = std.mem.alignForwardGeneric(u32, offset, 512);
+    cld.optional_header.size_of_headers = offset;
+    log.debug("allocating sections, starting at offset: 0x{x:0>8}", .{offset});
 
-        const hdr_name = cld.getString(hdr.name);
-
-        if (std.mem.eql(u8, hdr_name, ".text")) {
-            cld.optional_header.base_of_code = hdr.pointer_to_raw_data;
-        }
-        // else if (std.mem.eql(u8, hdr_name, ".data")) {
-        //     cld.optional_header.base_of_data = hdr.pointer_to_raw_data;
-        // }
-
-        if (hdr.characteristics & Coff.SectionHeader.flags.IMAGE_SCN_CNT_CODE != 0) {
-            cld.optional_header.size_of_code += hdr.size_of_raw_data;
-        } else if (hdr.characteristics & Coff.SectionHeader.flags.IMAGE_SCN_CNT_INITIALIZED_DATA != 0) {
-            cld.optional_header.size_of_initialized_data += hdr.size_of_raw_data;
-        } else if (hdr.characteristics & Coff.SectionHeader.flags.IMAGE_SCN_CNT_UNINITIALIZED_DATA != 0) {
-            cld.optional_header.size_of_uninitialized_data += hdr.size_of_raw_data;
-        }
-
-        if (!hdr.isGrouped()) {
-            log.debug("  allocated section '{s}' from 0x{x:0>8} to 0x{x:0>8}", .{
-                cld.getString(hdr.name),
-                hdr.pointer_to_raw_data,
-                hdr.pointer_to_raw_data + hdr.size_of_raw_data,
-            });
-        }
-    }
-
-    cld.optional_header.size_of_headers = std.mem.alignForwardGeneric(u32, offset, 512);
-}
-
-fn allocateAtoms(cld: *Cld) !void {
-    if (cld.coff_header.number_of_sections == 0) return;
-    // TODO: Merge allocateAtoms with allocateSections
-    var size_of_headers = cld.section_headers.items[0].pointer_to_raw_data;
-    size_of_headers = std.mem.alignForwardGeneric(u32, size_of_headers, 4096);
-    var file_size = size_of_headers;
-    var rva = std.mem.alignForwardGeneric(u32, size_of_headers, 4096); // TODO: Get alignment from configuration
+    var file_size = offset;
+    var rva = std.mem.alignForwardGeneric(u32, offset, 4096); // TODO: Get alignment from configuration
 
     var it = cld.atoms.iterator();
     while (it.next()) |entry| {
@@ -510,6 +471,18 @@ fn allocateAtoms(cld: *Cld) !void {
         }
         rva += std.mem.alignForwardGeneric(u32, virtual_size, 4096);
         file_size += std.mem.alignForwardGeneric(u32, raw_size, 512);
+
+        const hdr_name = cld.getString(hdr.name);
+        if (std.mem.eql(u8, hdr_name, ".text")) {
+            cld.optional_header.base_of_code = hdr.pointer_to_raw_data;
+        }
+        if (hdr.characteristics & Coff.SectionHeader.flags.IMAGE_SCN_CNT_CODE != 0) {
+            cld.optional_header.size_of_code += hdr.size_of_raw_data;
+        } else if (hdr.characteristics & Coff.SectionHeader.flags.IMAGE_SCN_CNT_INITIALIZED_DATA != 0) {
+            cld.optional_header.size_of_initialized_data += hdr.size_of_raw_data;
+        } else if (hdr.characteristics & Coff.SectionHeader.flags.IMAGE_SCN_CNT_UNINITIALIZED_DATA != 0) {
+            cld.optional_header.size_of_uninitialized_data += hdr.size_of_raw_data;
+        }
     }
 
     cld.optional_header.size_of_image = std.mem.alignForwardGeneric(u32, rva, 4096);
